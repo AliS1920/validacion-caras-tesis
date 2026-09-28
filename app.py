@@ -93,23 +93,26 @@ def main():
 
     try:
         supabase = get_supabase()
-        supabase.table("face_validation_comments").insert(
-            {
-                "expert_code": expert_code,
-                "comment": comments.strip(),
-                "submitted_at": datetime.now(timezone.utc).isoformat(),
-            },
+
+        # Guardar las 4 respuestas
+        supabase.table("face_validation_responses").insert(
+            rows,
             returning="minimal"
         ).execute()
 
+        # Guardar comentario solo si escribió uno
         if comments.strip():
-            supabase.table("face_validation_comments").insert({
-                "expert_code": expert_code,
-                "comment": comments.strip(),
-                "submitted_at": datetime.now(timezone.utc).isoformat(),
-            }).execute()
+            supabase.table("face_validation_comments").insert(
+                {
+                    "expert_code": expert_code,
+                    "comment": comments.strip(),
+                    "submitted_at": datetime.now(timezone.utc).isoformat(),
+                },
+                returning="minimal"
+            ).execute()
 
         st.success("Respuestas guardadas correctamente. Muchas gracias.")
+
     except Exception as exc:
         st.error("No se pudieron guardar las respuestas.")
         st.code(str(exc))

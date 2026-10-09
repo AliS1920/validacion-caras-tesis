@@ -1,4 +1,5 @@
 from __future__ import annotations
+
 import hashlib
 import random
 from datetime import datetime, timezone
@@ -7,11 +8,48 @@ from pathlib import Path
 import streamlit as st
 from supabase import create_client
 
+
+# ============================================================
+# CONFIGURACIÓN
+# ============================================================
+
 APP_DIR = Path(__file__).resolve().parent
 VIDEO_DIR = APP_DIR / "videos"
 
-EMOTIONS = ["asco", "felicidad", "miedo", "neutro"]
-VIDEO_FILES = ["video_1.mp4", "video_2.mp4", "video_3.mp4", "video_4.mp4"]
+EMOTIONS = [
+    "asco",
+    "felicidad",
+    "miedo",
+    "neutro",
+]
+
+PAGES = {
+    1: [
+        "video_01.mp4",
+        "video_02.mp4",
+        "video_03.mp4",
+        "video_04.mp4",
+    ],
+    2: [
+        "video_05.mp4",
+        "video_06.mp4",
+        "video_07.mp4",
+        "video_08.mp4",
+    ],
+    3: [
+        "video_09.mp4",
+        "video_10.mp4",
+        "video_11.mp4",
+        "video_12.mp4",
+    ],
+}
+
+TOTAL_PAGES = 3
+
+
+# ============================================================
+# SUPABASE
+# ============================================================
 
 def get_supabase():
     return create_client(
@@ -19,103 +57,458 @@ def get_supabase():
         st.secrets["SUPABASE_ANON_KEY"],
     )
 
-def ordered_videos(expert_code: str):
-    seed = int(hashlib.sha256(expert_code.encode("utf-8")).hexdigest()[:8], 16)
-    rng = random.Random(seed)
-    videos = VIDEO_FILES.copy()
-    rng.shuffle(videos)
-    return videos
 
-def main():
-    st.set_page_config(page_title="Validación de expresiones faciales", page_icon="🙂")
-    st.title("Validación de expresiones faciales")
-    st.write(
-        "Observe los cuatro videos y clasifique cada uno. "
-        "Debe usar una sola vez cada categoría: asco, felicidad, miedo y neutro."
+# ============================================================
+# ESTADO
+# ============================================================
+
+def initialize_state():
+    defaults = {
+        "started": False,
+        "completed": False,
+        "full_name": "",
+        "current_page": 1,
+        "answers": {},
+        "video_orders": {},
+        "session_id": None,
+    }
+
+    for key, value in defaults.items():
+        if key not in st.session_state:
+            st.session_state[key] = value
+
+
+def reset_validation():
+    keys = [
+        "started",
+        "completed",
+        "full_name",
+        "current_page",
+        "answers",
+        "video_orders",
+        "session_id",
+    ]
+
+    for key in keys:
+        if key in st.session_state:
+            del st.session_state[key]
+
+    st.rerun()
+
+
+# ============================================================
+# ORDEN DE VIDEOS
+# ============================================================
+
+def get_page_order(page_number: int) -> list[str]:
+    """
+    Todos los evaluadores reciben los mismos 12 videos.
+
+    El orden dentro de cada página se modifica de forma
+    determinística según el nombre del evaluador para reducir
+    posibles efectos de posición.
+    """
+
+    if page_number in st.session_state.video_orders:
+        return st.session_state.video_orders[page_number]
+
+    videos = PAGES[page_number].copy()
+
+    seed_text = (
+        f"{st.session_state.full_name.lower().strip()}"
+        f"|page={page_number}"
     )
 
-    expert_code = st.text_input("Código del experto", placeholder="EXP01").strip()
-    expert_role = st.text_input("Área o rol profesional (opcional)")
-    years = st.number_input("Años de experiencia (opcional)", min_value=0, max_value=60, value=0)
+    seed = int(
+        hashlib.sha256(
+            seed_text.encode("utf-8")
+        ).hexdigest()[:8],
+        16,
+    )
 
-    if not expert_code:
-        st.info("Ingrese un código de experto para comenzar.")
-        st.stop()
+    rng = random.Random(seed)
+    rng.shuffle(videos)
 
-    videos = ordered_videos(expert_code)
-    answers = {}
+    st.session_state.video_orders[page_number] = videos
 
-    with st.form("validation_form"):
-        for i, video_name in enumerate(videos, start=1):
-            st.markdown(f"### Video {i}")
-            video_path = VIDEO_DIR / video_name
-            if video_path.exists():
-                st.video(str(video_path))
-            else:
-                st.error(f"No se encontró {video_name} en {VIDEO_DIR}")
+    return videos
 
-            answers[video_name] = st.selectbox(
-                f"¿A qué emoción corresponde el Video {i}?",
-                ["Seleccionar..."] + EMOTIONS,
-                key=f"emotion_{video_name}",
-            )
 
-        comments = st.text_area("Comentario opcional")
-        submit = st.form_submit_button("Enviar respuestas")
+# ============================================================
+# VALIDACIONES
+# ============================================================
 
-    if not submit:
-        st.stop()
+def page_is_complete(page_number: int) -> bool:
+    videos = PAGES[page_number]
 
-    if any(v == "Seleccionar..." for v in answers.values()):
-        st.error("Debe clasificar los cuatro videos.")
-        st.stop()
+    return all(
+        st.session_state.answers.get(video)
+        in EMOTIONS
+        for video in videos
+    )
 
-    if len(set(answers.values())) != 4:
-        st.error("Debe usar cada emoción exactamente una vez.")
-        st.stop()
 
-    session_id = hashlib.sha256(
-        f"{expert_code}|{datetime.now(timezone.utc).isoformat()}".encode("utf-8")
-    ).hexdigest()[:16]
+def page_uses_all_emotions_once(page_number: int) -> bool:
+    videos = PAGES[page_number]
+
+    answers = [
+        st.session_state.answers.get(video)
+        for video in videos
+    ]
+
+    if any(answer not in EMOTIONS for answer in answers):
+        return False
+
+    return sorted(answers) == sorted(EMOTIONS)
+
+
+# ============================================================
+# GUARDADO
+# ============================================================
+
+def save_results():
+    now = datetime.now(timezone.utc)
+
+    session_id = st.session_state.session_id
+
+    if not session_id:
+        session_id = hashlib.sha256(
+            (
+                st.session_state.full_name
+                + "|"
+                + now.isoformat()
+            ).encode("utf-8")
+        ).hexdigest()[:16]
+
+        st.session_state.session_id = session_id
 
     rows = []
-    for position, video_name in enumerate(videos, start=1):
-        rows.append({
-            "session_id": session_id,
-            "expert_code": expert_code,
-            "expert_role": expert_role.strip() or None,
-            "years_experience": int(years) if years > 0 else None,
-            "video_position": position,
-            "video_file": video_name,
-            "selected_emotion": answers[video_name],
-            "submitted_at": datetime.now(timezone.utc).isoformat(),
-        })
 
-    try:
-        supabase = get_supabase()
+    global_position = 1
 
-        # Guardar las 4 respuestas
-        supabase.table("face_validation_responses").insert(
-            rows,
-            returning="minimal"
-        ).execute()
+    for page_number in range(1, TOTAL_PAGES + 1):
 
-        # Guardar comentario solo si escribió uno
-        if comments.strip():
-            supabase.table("face_validation_comments").insert(
-                {
-                    "expert_code": expert_code,
-                    "comment": comments.strip(),
-                    "submitted_at": datetime.now(timezone.utc).isoformat(),
-                },
-                returning="minimal"
-            ).execute()
+        page_order = get_page_order(page_number)
 
-        st.success("Respuestas guardadas correctamente. Muchas gracias.")
+        for page_position, video_name in enumerate(
+            page_order,
+            start=1,
+        ):
+            rows.append({
+                "session_id": session_id,
+                "full_name": st.session_state.full_name,
+                "page_number": page_number,
+                "page_position": page_position,
+                "video_position": global_position,
+                "video_file": video_name,
+                "selected_emotion":
+                    st.session_state.answers[video_name],
+                "submitted_at": now.isoformat(),
+            })
 
-    except Exception as exc:
-        st.error("No se pudieron guardar las respuestas.")
-        st.code(str(exc))
+            global_position += 1
+
+    supabase = get_supabase()
+
+    supabase.table(
+        "face_validation_responses"
+    ).insert(
+        rows,
+        returning="minimal",
+    ).execute()
+
+
+# ============================================================
+# PANTALLA INICIAL
+# ============================================================
+
+def render_start():
+    st.title("Validación de expresiones faciales")
+
+    st.write(
+        "A continuación observará 12 videos de "
+        "representaciones faciales sintéticas."
+    )
+
+    st.write(
+        "La actividad está dividida en tres etapas. "
+        "En cada una deberá observar cuatro videos y "
+        "clasificar cada expresión como asco, felicidad, "
+        "miedo o neutro."
+    )
+
+    st.info(
+        "En cada grupo de cuatro videos debe utilizar "
+        "cada categoría exactamente una vez."
+    )
+
+    full_name = st.text_input(
+        "Nombre completo",
+        placeholder="Escriba su nombre completo",
+    )
+
+    if st.button(
+        "Comenzar validación",
+        type="primary",
+        use_container_width=True,
+    ):
+        clean_name = full_name.strip()
+
+        if len(clean_name) < 3:
+            st.error(
+                "Por favor ingrese su nombre completo."
+            )
+            return
+
+        st.session_state.full_name = clean_name
+        st.session_state.started = True
+        st.session_state.current_page = 1
+        st.session_state.answers = {}
+        st.session_state.video_orders = {}
+
+        st.rerun()
+
+
+# ============================================================
+# PÁGINAS DE VALIDACIÓN
+# ============================================================
+
+def render_validation_page():
+    page_number = st.session_state.current_page
+
+    st.title("Validación de expresiones faciales")
+
+    st.caption(
+        f"Etapa {page_number} de {TOTAL_PAGES}"
+    )
+
+    st.progress(
+        page_number / TOTAL_PAGES
+    )
+
+    st.write(
+        "Observe cada video y seleccione la emoción "
+        "que considere que representa."
+    )
+
+    st.info(
+        "En esta etapa debe utilizar una sola vez cada "
+        "categoría: asco, felicidad, miedo y neutro."
+    )
+
+    videos = get_page_order(page_number)
+
+    for display_position, video_name in enumerate(
+        videos,
+        start=1,
+    ):
+
+        st.divider()
+
+        st.subheader(
+            f"Video {display_position}"
+        )
+
+        video_path = VIDEO_DIR / video_name
+
+        if video_path.exists():
+            st.video(str(video_path))
+        else:
+            st.error(
+                f"No se encontró el archivo {video_name}."
+            )
+
+        current_answer = (
+            st.session_state.answers
+            .get(video_name)
+        )
+
+        options = [
+            "Seleccionar...",
+            *EMOTIONS,
+        ]
+
+        if current_answer in EMOTIONS:
+            selected_index = options.index(
+                current_answer
+            )
+        else:
+            selected_index = 0
+
+        answer = st.selectbox(
+            f"¿Qué emoción representa el Video "
+            f"{display_position}?",
+            options,
+            index=selected_index,
+            key=(
+                f"select_"
+                f"{page_number}_"
+                f"{video_name}"
+            ),
+        )
+
+        if answer == "Seleccionar...":
+            st.session_state.answers.pop(
+                video_name,
+                None,
+            )
+        else:
+            st.session_state.answers[
+                video_name
+            ] = answer
+
+    st.divider()
+
+    left, right = st.columns(2)
+
+    with left:
+
+        if page_number > 1:
+
+            if st.button(
+                "← Anterior",
+                use_container_width=True,
+            ):
+                st.session_state.current_page -= 1
+                st.rerun()
+
+    with right:
+
+        if page_number < TOTAL_PAGES:
+
+            if st.button(
+                "Siguiente →",
+                type="primary",
+                use_container_width=True,
+            ):
+
+                if not page_is_complete(
+                    page_number
+                ):
+                    st.error(
+                        "Debe clasificar los cuatro videos "
+                        "antes de continuar."
+                    )
+
+                elif not page_uses_all_emotions_once(
+                    page_number
+                ):
+                    st.error(
+                        "Debe utilizar cada emoción "
+                        "exactamente una vez en esta etapa."
+                    )
+
+                else:
+                    st.session_state.current_page += 1
+                    st.rerun()
+
+        else:
+
+            if st.button(
+                "Enviar respuestas",
+                type="primary",
+                use_container_width=True,
+            ):
+
+                if not page_is_complete(
+                    page_number
+                ):
+                    st.error(
+                        "Debe clasificar los cuatro videos."
+                    )
+                    return
+
+                if not page_uses_all_emotions_once(
+                    page_number
+                ):
+                    st.error(
+                        "Debe utilizar cada emoción "
+                        "exactamente una vez en esta etapa."
+                    )
+                    return
+
+                # Verificación final de las tres páginas
+                for page in range(
+                    1,
+                    TOTAL_PAGES + 1,
+                ):
+                    if not page_is_complete(page):
+                        st.error(
+                            f"La etapa {page} tiene "
+                            "respuestas incompletas."
+                        )
+                        return
+
+                    if not page_uses_all_emotions_once(
+                        page
+                    ):
+                        st.error(
+                            f"La etapa {page} no utiliza "
+                            "las cuatro emociones una vez."
+                        )
+                        return
+
+                try:
+                    with st.spinner(
+                        "Guardando respuestas..."
+                    ):
+                        save_results()
+
+                    st.session_state.completed = True
+                    st.rerun()
+
+                except Exception as exc:
+                    st.error(
+                        "No se pudieron guardar "
+                        "las respuestas."
+                    )
+                    st.code(str(exc))
+
+
+# ============================================================
+# FINAL
+# ============================================================
+
+def render_completed():
+    st.title("Validación completada")
+
+    st.success(
+        "Sus respuestas fueron guardadas correctamente."
+    )
+
+    st.write(
+        "Muchas gracias por participar en esta "
+        "validación."
+    )
+
+    st.write(
+        "Ya puede cerrar esta página."
+    )
+
+
+# ============================================================
+# MAIN
+# ============================================================
+
+def main():
+    st.set_page_config(
+        page_title="Validación de expresiones faciales",
+        page_icon="🙂",
+        layout="centered",
+    )
+
+    initialize_state()
+
+    if st.session_state.completed:
+        render_completed()
+        return
+
+    if not st.session_state.started:
+        render_start()
+        return
+
+    render_validation_page()
+
 
 if __name__ == "__main__":
     main()
